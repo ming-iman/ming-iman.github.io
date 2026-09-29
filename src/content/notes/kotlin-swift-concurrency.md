@@ -1,7 +1,8 @@
 ---
 title: "从挂起到页面状态：Kotlin 与 Swift 并发开发笔记"
-description: "用八组移动端案例理解挂起、结构化并发、取消、错误传播、异步流、共享状态、搜索与页面生命周期。"
+description: "用八组移动端案例与个人主页大作业，理解并发聚合、取消传播、失败降级、搜索防抖与页面状态。"
 date: 2026-09-29
+updated: 2026-09-29
 category: "移动端开发"
 tags: [Kotlin, Swift, 协程, 并发, 学习笔记]
 ---
@@ -101,7 +102,7 @@ do {
 
 `Task.sleep` 响应取消并抛错，`defer` 在离开作用域时执行。读取 `worker.value` 不会触发取消；它负责等待任务结束并观察结果或错误。
 
-如果任务内部捕获取消异常且不重抛，任务可以正常返回；取消标记不会因此清除。对于可复用的异步函数，通常应在清理后继续传播取消，避免把停止意图变成成功结果并继续后续逻辑。
+Swift 任务内部捕获取消异常且不重抛，可以正常返回结果；已有的取消标记不会因此清除。Kotlin 中，已被取消的 Job 不会因吞掉异常恢复正常；若只是内部操作主动抛出取消异常，吞掉它则可能导致外层 Job 正常完成。对于可复用的异步函数，通常应在清理后继续传播取消，避免把停止意图变成成功结果并继续后续逻辑。
 
 ### 超时为何可能“超时了还没返回”
 
@@ -288,6 +289,219 @@ do {
 MainActor 管隔离，不自动提供 UI 观察。SwiftUI 还需要 Observation、ObservableObject 或显式更新 State；Android 使用生命周期感知的收集也不等于自动取消 ViewModel 内所有后台请求。
 
 取消后的状态也要有业务定义：页面已经离开，可以不展示错误；页面仍可见且用户主动取消加载，则要恢复 Idle 或旧内容，而不是永久留在 Loading。
+
+## 09 · 毕业作业：把三个边界串起来
+
+个人主页像一个点单台：A 负责并发备齐数据，B 负责把结果交给当前页面，C 负责在输入变化后撤销旧搜索。三个部分分别回答：哪些失败可降级、取消在哪里结束、谁还有资格写状态。
+
+```text
+刷新 → B 页面任务 → A 数据聚合 ─┬─ name：必需
+                              ├─ avatar：失败用默认图
+                              └─ unread：失败用占位
+输入 → C 取消旧搜索 → 防抖 → 搜索接口
+                         ↓
+              取消检查 + 请求编号检查 → 页面状态
+离开页面 → 取消持有的任务 + 使旧编号失效 + 恢复 Idle
+```
+
+### A · 降级放进子任务，不要等作用域已经失败
+
+Kotlin 可以在两个可选子任务内部完成降级，再让普通 `coroutineScope` 管理整体失败：
+
+```kotlin
+suspend fun loadProfile(service: ProfileService): Profile = coroutineScope {
+    val name = async { service.name() }
+    val avatar = async {
+        try {
+            service.avatar()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            currentCoroutineContext().ensureActive()
+            DEFAULT_AVATAR
+        }
+    }
+    val unread = async {
+        try {
+            service.unread()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            currentCoroutineContext().ensureActive()
+            null
+        }
+    }
+    Profile(name.await(), avatar.await(), unread.await())
+}
+```
+
+三个请求先启动再等待。name 的普通失败使整个作用域失败；可选请求的普通失败已经转换为值，不会破坏父作用域。无需由 name 手动取消另外两个任务，也不必暂存异常后逐个等待。`supervisorScope` 也可以实现这个业务，但这里不需要额外的失败隔离机制。
+
+只捕获 `IllegalStateException` 不等于覆盖所有请求失败：测试里的 `error(...)` 恰好抛出这个类型，真实接口还可能抛 `IOException`。本练习约定普通 `Exception` 可降级；生产代码应按业务明确可恢复的错误种类。
+
+Swift 用 `async let` 表达三个固定子任务，把降级放在辅助函数中：
+
+```swift
+private func loadAvatar(_ service: ProfileService) async throws -> String {
+    do {
+        return try await service.avatar()
+    } catch is CancellationError {
+        throw CancellationError()
+    } catch {
+        try Task.checkCancellation()
+        return defaultAvatar
+    }
+}
+
+private func loadUnread(_ service: ProfileService) async throws -> Int? {
+    do {
+        return try await service.unread()
+    } catch is CancellationError {
+        throw CancellationError()
+    } catch {
+        try Task.checkCancellation()
+        return nil
+    }
+}
+
+func loadProfile(_ service: ProfileService) async throws -> CapstoneProfile {
+    async let name = service.name()
+    async let avatar = loadAvatar(service)
+    async let unread = loadUnread(service)
+    return try await CapstoneProfile(name: name, avatar: avatar, unread: unread)
+}
+```
+
+初始化 `CapstoneProfile` 本身是同步的；这里的 `try await` 用于读取子任务结果。name 失败后，错误在等待其结果时被观察到；错误导致函数退出作用域，Swift 才会取消其他未完成的子任务并等待它们结束。不要理解成“任意 async let 一失败，兄弟任务立即取消”。见 [async let 的作用域与错误传播规则](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0317-async-let.md)。
+
+### 取消异常类型与任务取消状态，是两件事
+
+接口可能在任务已经取消后，仍抛出普通错误。因此“先单独捕获取消异常，再在普通错误分支检查当前任务是否取消”不是 Swift 独有技巧，Kotlin 也可以这样防御：
+
+| 检查 | Kotlin | Swift |
+|---|---|---|
+| 当前收到的异常是不是取消 | `catch (e: CancellationException)` | `catch is CancellationError` |
+| 当前任务是否已经取消 | `ensureActive()` | `try Task.checkCancellation()` |
+
+前者识别异常类型，后者读取任务状态。目的都是避免在应当停止时返回默认值，继续后续业务。
+
+Swift 的 `try` 表示可能抛错，`await` 表示可能挂起。`Task.checkCancellation()` 是可能抛错的同步检查，所以只需要 `try`；请求调用可能同时需要 `try await`。Kotlin 的异常机制不要求调用处显式写 `try`。
+
+### cancel、cancelAndJoin、isActive、ensureActive 的职责
+
+| Kotlin 操作 | 意义 |
+|---|---|
+| `job.cancel()` | 请求取消，不等待清理结束 |
+| `job.cancelAndJoin()` | 请求取消，再挂起等待结束；不是阻塞线程 |
+| `isActive` | 返回布尔值，由调用方决定后续执行 |
+| `ensureActive()` | 已取消时抛异常，离开正常执行路径 |
+
+`cancelAndJoin()` 可以理解为先 cancel 再 join，但等待者自身也可能被取消。被取消的工作不配合时，等待不保证立即结束。结构化作用域已经负责退出前等待子任务，因此通常不必再逐个手动 join。
+
+```kotlin
+if (isActive) {
+    updateState()
+}
+performNextStep() // 即使不活跃，仍会执行到这里
+```
+
+换成 `ensureActive()` 可以在已取消时中断后续工作，但要避免再用空 catch 吞掉取消异常。两者都只是当前时刻的检查，不是锁，也不能代替请求编号。
+
+### B · 页面任务如何处理取消与失败
+
+页面任务把普通失败变成状态，把取消视为结束工作。Kotlin 的关键任务体如下，`ticket` 在发起新请求时分配：
+
+```kotlin
+try {
+    val profile = loader()
+    ensureActive()
+    if (ticket == pageVersion) {
+        page.value = ViewState.Content(profile)
+    }
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (failure: Exception) {
+    ensureActive()
+    if (ticket == pageVersion) {
+        page.value = ViewState.Failure(failure.message ?: "加载失败，请重试")
+    }
+}
+```
+
+取消与编号检查必须覆盖成功和普通失败，否则旧错误也可能覆盖新页面。代码约定从同一 UI 线程管理请求；检查与写入之间没有挂起点。Swift 对应的状态与版本号由 MainActor 隔离，但 await 后仍要重新检查请求是否有效。
+
+Kotlin 空的取消 catch 有一个容易漏测的区别：如果外部已经 cancel，吞掉异常不会使 Job 恢复活跃；但如果 loader 只是主动抛出 `CancellationException`，吞掉它可能使外层 Job 正常完成。因此本练习的 Kotlin 页面任务重新抛出取消，保留返回 Job 的取消语义。
+
+Swift 的页面接口则显式返回 `Task<Void, Never>`：Void 表示没有结果值，Never 表示任务不向外抛错。因此它在任务边界这样结束取消路径：
+
+```swift
+} catch is CancellationError {
+    return
+} catch {
+    guard !Task.isCancelled, ticket == pageVersion else { return }
+    pageState = .failure(String(describing: error))
+}
+```
+
+如果在这里重新抛出，任务会成为 `Task<Void, Error>`，与属性和返回类型不匹配。需要外部通过 `try await task.value` 接收错误时，应一起调整接口类型。这个区别来自任务边界设计，不是“Swift 永远吞取消，Kotlin 永远重抛”。
+
+Swift 中，已调用 cancel 的任务不会因 catch 后 return 而清除取消标志；单纯抛出 `CancellationError` 也不必然设置外层任务的取消标志。
+
+### launch 抛出的异常由谁处理
+
+普通业务异常可以在任务内部转为 Failure。Kotlin 未捕获的普通异常会按父子关系传播：普通 Job 通常随子任务失败而取消，SupervisorJob 隔离直接子任务的失败，但不代替异常处理。最终未处理的 launch 异常可能交给 CoroutineExceptionHandler 或平台未捕获异常机制。取消异常则作为正常取消处理，不仅因子任务取消就使父任务失败。见 [Kotlin 异常处理规则](https://kotlinlang.org/docs/exception-handling.html)。
+
+在同步调用 `refresh()` 外套 try/catch，不能捕获另一个协程体里的异步失败；`job.join()` 也不负责重新抛出目标任务的异常。`Deferred.await()` 才会读取目标结果或失败。取消仍可能通过挂起调用传播，外部通常让它继续传播，清理使用 finally。
+
+### C · 防抖结束和请求结束，是两个检查点
+
+新输入到来就取消旧任务并增加版本号，然后 trim 输入。空字符串恢复 Idle 并结束；非空输入等待 300ms 再请求。
+
+```text
+新输入 → 旧任务立即失效
+新任务 → 防抖等待 → 取消检查 → 请求 → 取消与版本检查 → 写状态
+```
+
+Kotlin 的 `delay` 支持取消：等待期间收到 cancel，会抛出取消异常。它放在 try/catch 外也可以自然让 launch 取消。Swift 若返回 `Task<Void, Never>`，可抛错的防抖操作必须在任务内部处理，否则任务类型不匹配。
+
+下面是 Swift 搜索任务体；`debounce` 是注入的等待函数，默认实现为 `Task.sleep(for: .milliseconds(300))`：
+
+```swift
+let task = Task { @MainActor in
+    guard !normalized.isEmpty else { return }
+    do {
+        try await debounce()
+        try Task.checkCancellation()
+
+        let result = try await loader(normalized)
+        try Task.checkCancellation()
+        guard ticket == searchVersion else { return }
+        searchState = .content(result)
+    } catch is CancellationError {
+        return
+    } catch {
+        guard !Task.isCancelled, ticket == searchVersion else { return }
+        searchState = .failure(String(describing: error))
+    }
+}
+```
+
+`guard !normalized.isEmpty` 判断布尔条件，不需要 `guard let`；后者用于 Optional 绑定。
+
+防抖后的检查阻止旧任务发起请求，请求后的检查阻止旧结果写入。虽然默认 sleep 支持取消，但测试注入的等待函数或第三方实现未必配合，因此保留等待后的检查。成功和错误两条路径都要防过期回写。
+
+### 验收不能只覆盖成功结果
+
+| 边界 | 验证方式 |
+|---|---|
+| 真正并发 | Kotlin 虚拟时间验证 120/180/150ms 请求共用 180ms；Swift 用可控门确认三个请求都启动后才放行 |
+| 可选降级 | 同时测试 `IllegalStateException` 与 `IOException` 等不同普通错误 |
+| 取消与清理 | 检查子任务清理、返回 Job 的取消状态；不要只断言没显示 Failure |
+| 乱序 | 让旧请求忽略取消，分别晚成功、晚失败，确认最新状态不变 |
+| 搜索防抖 | 在等待窗口内连续输入，确认只请求最后的非空查询 |
+| 空输入与关闭 | 验证不发请求、取消在途工作、清空结果，以及重新进入可加载 |
+
+测试中的超时只是防止错误实现卡死，不是接口性能标准。逻辑测试通过，也不等于已经验证真实 App 的生命周期、UI 响应或阻塞 I/O 的执行方式。以上示例需要框架中的类型、状态属性和注入接口；完整接入时还要确认任务所有者、UI 观察方式和退出时的取消策略。
 
 ## 计时补充：不要把经过时间当作 CPU 时间
 
