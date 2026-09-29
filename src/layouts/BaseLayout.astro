@@ -1,0 +1,45 @@
+---
+import '../styles/global.css';
+interface Props { title?: string; description?: string; article?: boolean; }
+const {
+  title = 'Ming 的学习笔记',
+  description = '关于移动端开发、编程语言与工程实践的学习笔记。把问题想清楚，把知识写下来。',
+  article = false,
+} = Astro.props;
+const pathname = Astro.url.pathname;
+const canonical = new URL(pathname, Astro.site);
+const nav = [['/', '笔记'], ['/categories/', '分类'], ['/tags/', '标签'], ['/archive/', '归档']];
+---
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f8f9fb" />
+    <title>{title === 'Ming 的学习笔记' ? title : `${title} · Ming 的学习笔记`}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content={article ? 'article' : 'website'} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:locale" content="zh_CN" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到正文</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="Ming 的学习笔记首页"><span class="brand-mark" aria-hidden="true">M.</span><span>Ming <span class="brand-sub">/ 学习笔记</span></span></a>
+        <nav aria-label="主导航">
+          {nav.map(([href, label]) => <a href={href} aria-current={(href === '/' ? pathname === '/' || pathname.startsWith('/notes/') : pathname.startsWith(href)) ? 'page' : undefined}>{label}</a>)}
+        </nav>
+      </div>
+    </header>
+    <main id="main" tabindex="-1"><slot /></main>
+    <footer class="site-footer">
+      <p>持续学习，留下可以回看的记录。</p>
+      <div><span>© {new Date().getUTCFullYear()} Ming</span><a href="https://github.com/ming-iman/ming-iman.github.io">站点源码 ↗</a><a href="/sitemap-index.xml">站点地图</a></div>
+    </footer>
+  </body>
+</html>

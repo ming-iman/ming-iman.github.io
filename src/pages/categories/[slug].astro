@@ -1,0 +1,8 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import NotesList from '../../components/NotesList.astro';
+import { publishedNotes, terms } from '../../lib/notes';
+export async function getStaticPaths() { return terms(await publishedNotes(), 'category').map(([slug, group]) => ({ params: { slug }, props: { group } })); }
+const { group } = Astro.props;
+---
+<BaseLayout title={`${group.name} · 分类`}><div class="page-shell compact-page"><a class="back-link" href="/categories/">← 全部分类</a><p class="eyebrow">CATEGORY</p><h1>{group.name}</h1><p class="page-description">{group.notes.length} 篇相关笔记</p><NotesList notes={group.notes} /></div></BaseLayout>

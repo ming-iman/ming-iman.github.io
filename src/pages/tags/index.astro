@@ -1,0 +1,6 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { publishedNotes, terms, termUrl } from '../../lib/notes';
+const groups = terms(await publishedNotes(), 'tags');
+---
+<BaseLayout title="标签"><div class="page-shell compact-page"><p class="eyebrow">CONNECTIONS</p><h1>标签</h1><p class="page-description">用关键词连接不同主题，找到下一条学习线索。</p><ul class="tag-index">{groups.map(([, group]) => <li><a href={termUrl('tags', group.name)}><span># {group.name}</span><span class="count">{group.notes.length}</span></a></li>)}</ul></div></BaseLayout>

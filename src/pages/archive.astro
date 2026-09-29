@@ -1,0 +1,7 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { publishedNotes, dateLabel, noteUrl } from '../lib/notes';
+const notes = await publishedNotes();
+const years = [...new Set(notes.map((note) => note.data.date.getUTCFullYear()))];
+---
+<BaseLayout title="归档"><div class="page-shell compact-page"><p class="eyebrow">TIMELINE</p><h1>学习归档</h1><p class="page-description">沿着时间，回看每一步积累。</p>{years.map((year) => <section class="archive-year"><h2>{year}</h2><ul>{notes.filter((note) => note.data.date.getUTCFullYear() === year).map((note) => <li><time datetime={dateLabel(note.data.date)}>{dateLabel(note.data.date).slice(5)}</time><a href={noteUrl(note.id)}>{note.data.title}</a></li>)}</ul></section>)}</div></BaseLayout>

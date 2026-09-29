@@ -1,0 +1,26 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import NoteSearch from '../components/NoteSearch';
+import { publishedNotes, dateLabel, noteUrl, readingMinutes, terms, termUrl } from '../lib/notes';
+const notes = await publishedNotes();
+const categories = terms(notes, 'category');
+const summaries = notes.map((note) => ({ id: note.id, title: note.data.title, description: note.data.description, category: note.data.category, tags: note.data.tags, date: dateLabel(note.data.date), minutes: readingMinutes(note.body), href: noteUrl(note.id) }));
+---
+<BaseLayout>
+  <div class="page-shell">
+    <section class="home-intro" aria-labelledby="home-title">
+      <p class="eyebrow">LEARNING IN PUBLIC</p>
+      <h1 id="home-title">把问题想清楚，<br />把知识写下来。</h1>
+      <p class="intro-text">记录开发中的学习与思考。用案例建立理解，<br class="desktop-break" />把零散的问题，整理成可以回看的笔记。</p>
+      <div class="intro-bottom"><span class="small-label">Ming 的学习笔记</span><a href="/archive/">按时间浏览 <span aria-hidden="true">→</span></a></div>
+    </section>
+    <div class="home-columns">
+      <NoteSearch notes={summaries} client:load />
+      <aside class="home-aside" aria-label="探索笔记">
+        <h2>按主题探索</h2>
+        <ul class="category-list">{categories.map(([, group]) => <li><a href={termUrl('categories', group.name)}><span>{group.name}</span><span class="count">{group.notes.length}</span></a></li>)}</ul>
+        <div class="aside-note"><span class="small-label">关于这里</span><p>不只记录结论，也留下推导、易错点和验证方法。</p><a href="/tags/">浏览所有标签 →</a></div>
+      </aside>
+    </div>
+  </div>
+</BaseLayout>

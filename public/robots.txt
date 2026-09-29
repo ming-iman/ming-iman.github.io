@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://ming-iman.github.io/sitemap-index.xml

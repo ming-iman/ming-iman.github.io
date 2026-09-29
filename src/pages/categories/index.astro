@@ -1,0 +1,10 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { publishedNotes, terms, termUrl } from '../../lib/notes';
+const groups = terms(await publishedNotes(), 'category');
+---
+<BaseLayout title="分类">
+  <div class="page-shell compact-page"><p class="eyebrow">TOPICS</p><h1>分类</h1><p class="page-description">按知识领域整理，让每次学习都有迹可循。</p>
+    <ul class="taxonomy-list">{groups.map(([, group]) => <li><a href={termUrl('categories', group.name)}><span>{group.name}</span><span>{group.notes.length} 篇笔记 <span aria-hidden="true">→</span></span></a></li>)}</ul>
+  </div>
+</BaseLayout>

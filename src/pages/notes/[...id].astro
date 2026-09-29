@@ -1,0 +1,58 @@
+---
+import { render, type CollectionEntry } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { publishedNotes, dateLabel, termUrl, readingMinutes } from '../../lib/notes';
+export async function getStaticPaths() {
+  return (await publishedNotes()).map((note) => ({ params: { id: note.id }, props: { note } }));
+}
+interface Props { note: CollectionEntry<'notes'>; }
+const { note } = Astro.props;
+const { Content, headings } = await render(note);
+const toc = headings.filter((heading) => heading.depth === 2);
+---
+<BaseLayout title={note.data.title} description={note.data.description} article>
+  <div class="article-shell">
+    <a class="back-link" href="/">← 全部笔记</a>
+    <header class="article-header">
+      <a class="eyebrow category-link" href={termUrl('categories', note.data.category)}>{note.data.category}</a>
+      <h1>{note.data.title}</h1>
+      <p class="article-description">{note.data.description}</p>
+      <div class="note-meta"><span>Ming</span><span aria-hidden="true">·</span><time datetime={dateLabel(note.data.date)}>{dateLabel(note.data.date)}</time><span aria-hidden="true">·</span><span>约 {readingMinutes(note.body)} 分钟阅读</span>{note.data.updated && <span>更新于 {dateLabel(note.data.updated)}</span>}</div>
+      <div class="tags">{note.data.tags.map((tag) => <a href={termUrl('tags', tag)}># {tag}</a>)}</div>
+    </header>
+    <div class="article-grid">
+      <div class="article-main">
+        <details class="mobile-toc"><summary>本文目录 <span aria-hidden="true">＋</span></summary><nav aria-label="本文目录（移动端）"><ol>{toc.map((heading) => <li><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ol></nav></details>
+        <article class="prose"><Content /></article>
+        <div class="article-end"><span class="end-dot" aria-hidden="true"></span><p>把知识带回代码里，用一次实验验证理解。</p><a href="/">← 返回全部笔记</a></div>
+      </div>
+      <aside class="desktop-toc"><nav aria-label="本文目录"><p class="small-label">ON THIS PAGE / 目录</p><ol>{toc.map((heading) => <li><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ol><a class="to-top" href="#main">回到顶部 ↑</a></nav></aside>
+    </div>
+  </div>
+</BaseLayout>
+<script>
+  for (const pre of document.querySelectorAll<HTMLPreElement>('.prose pre')) {
+    const button = document.createElement('button');
+    button.className = 'copy-code';
+    button.type = 'button';
+    button.textContent = '复制';
+    button.setAttribute('aria-label', '复制这段代码');
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(pre.querySelector('code')?.textContent ?? '');
+        button.textContent = '已复制';
+      } catch { button.textContent = '请手动选择复制'; }
+      window.setTimeout(() => { button.textContent = '复制'; }, 2200);
+    });
+    pre.append(button);
+  }
+  for (const table of document.querySelectorAll('.prose table')) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'table-scroll';
+    wrapper.tabIndex = 0;
+    wrapper.setAttribute('role', 'region');
+    wrapper.setAttribute('aria-label', '对照表，可横向滚动');
+    table.before(wrapper);
+    wrapper.append(table);
+  }
+</script>
