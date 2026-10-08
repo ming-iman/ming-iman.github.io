@@ -1,5 +1,6 @@
 ---
 import { render, type CollectionEntry } from 'astro:content';
+import '@fontsource/fira-code/400.css';
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import { publishedNotes, dateLabel, termUrl, readingMinutes } from '../../lib/notes';
 export async function getStaticPaths() {
@@ -32,6 +33,12 @@ const toc = headings.filter((heading) => heading.depth === 2);
 </BaseLayout>
 <script>
   for (const pre of document.querySelectorAll<HTMLPreElement>('.prose pre')) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-block';
+    pre.before(wrapper);
+    wrapper.append(pre);
+    pre.tabIndex = 0;
+    pre.setAttribute('aria-label', '代码，可横向滚动');
     const button = document.createElement('button');
     button.className = 'copy-code';
     button.type = 'button';
@@ -44,7 +51,7 @@ const toc = headings.filter((heading) => heading.depth === 2);
       } catch { button.textContent = '请手动选择复制'; }
       window.setTimeout(() => { button.textContent = '复制'; }, 2200);
     });
-    pre.append(button);
+    wrapper.append(button);
   }
   for (const table of document.querySelectorAll('.prose table')) {
     const wrapper = document.createElement('div');
