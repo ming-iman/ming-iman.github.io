@@ -1,19 +1,19 @@
 ---
-title: "从挂起到页面状态：Kotlin 与 Swift 并发开发笔记"
-description: "用八组移动端案例与个人主页大作业，理解并发聚合、取消传播、失败降级、搜索防抖与页面状态。"
+title: "Kotlin 与 Swift 并发开发笔记"
+description: "整理 Kotlin 与 Swift 的挂起、任务生命周期、取消、错误处理、异步流与状态管理，以及页面加载和搜索中的常见问题。"
 date: 2026-09-29
-updated: 2026-09-29
+updated: 2026-10-08
 category: "移动端开发"
 tags: [Kotlin, Swift, 协程, 并发, 学习笔记]
 ---
 
-协程学习的难点，往往不在 `async` 或 `await` 怎么写，而在于四个问题：**谁创建工作，谁拥有生命周期，谁等待结果，以及谁能修改状态。**
+Kotlin 和 Swift 都能用顺序代码表达异步操作，但任务的创建、取消和错误传播并不完全相同。写并发代码时，需要明确任务由谁持有、何时结束，以及返回的结果是否仍然有效。
 
-这篇笔记用八组 Kotlin 与 Swift 对照案例，串起从基础挂起到移动端页面加载的完整路径。示例用延迟模拟请求；延迟数字用于说明执行关系，不是性能承诺。
+以下代码省略了部分类型定义和导入，重点说明执行顺序和状态变化。延迟用于模拟请求，不代表实际网络耗时。
 
-## 01 · 挂起不等于并发
+## 挂起与并发
 
-像点餐：先等汤上桌再点面，两段等待相加；先把两道菜都下单，等待才能重叠。
+挂起会暂停当前任务，让线程有机会执行其他工作。当前任务仍按代码顺序执行：一次调用没有返回，下一行就不会开始。
 
 ```kotlin
 suspend fun loadSequentially(): Header {
@@ -31,22 +31,9 @@ func loadSequentially() async throws -> Header {
 }
 ```
 
-两段代码都是顺序调用，总耗时通常接近 300ms 加运行开销。
+如果两个请求分别等待 120ms 和 180ms，这两种写法的总耗时都接近 300ms，加上运行开销。
 
-**当前任务在等待，不代表执行线程也被阻塞。** 挂起时线程可以处理其他任务，但当前任务的下一行仍需等本次调用返回后执行。
-
-| 意图 | Kotlin | Swift |
-|---|---|---|
-| 声明可挂起函数 | `suspend fun` | `func ... async` |
-| 直接调用并等待 | 调用 suspend 函数 | `await`，抛错调用再加 `try` |
-| 创建结构化子任务 | 作用域内 `async {}` | `async let` 或任务组 |
-| 获取子任务结果 | `Deferred.await()` | `await` 子任务绑定或读取组结果 |
-
-Kotlin `async {}` 是创建子协程的构建器；Swift 函数声明中的 `async` 标记函数具有异步能力，更接近 Kotlin 的 `suspend`。不要因为名字相同就把它们当成同一种操作。
-
-## 02 · 结构化并发：工作要有人收尾
-
-两个独立请求可以先启动，再等待。
+要让独立请求重叠执行，需要先创建子任务，再等待结果：
 
 ```kotlin
 suspend fun loadHeader(): Header = coroutineScope {
@@ -64,249 +51,103 @@ func loadHeader() async throws -> Header {
 }
 ```
 
-```text
-父作用域 ─┬─ 名字请求：120ms ─┐
-          └─ 未读请求：180ms ─────┤ → 合并结果
-```
+等待名字时，未读请求已经开始。总耗时通常接近较慢请求的耗时。按顺序读取结果不会使已经启动的任务变成串行；创建一个任务后立即等待，再创建下一个，才会失去这部分并发。
 
-等待名字时，未读请求已经可以推进。因此总耗时通常接近较慢请求的耗时，而不是两者之和。
-
-Kotlin `coroutineScope` 是挂起函数，提供作用域并等待代码块及其子任务结束；它不是“切换后台线程”的指令。`fetchName` 只在调用它的协程中工作，所以不必再包一层作用域；并发版 `loadHeader` 则需要作用域来创建和管理子任务。
-
-| Kotlin 工具 | 职责 | 返回值 |
+| 操作 | Kotlin | Swift |
 |---|---|---|
-| `coroutineScope` | 管理一组子任务，返回前等待它们结束 | 代码块结果 |
-| `launch` | 启动不需要业务返回值的子协程 | `Job` |
-| `async` | 启动有结果的子协程 | `Deferred<T>` |
+| 声明可挂起函数 | `suspend fun` | `func ... async` |
+| 调用并等待 | 直接调用挂起函数 | `await`；可能抛错时加 `try` |
+| 创建结构化子任务 | 作用域内 `async {}` | `async let`、任务组 |
+| 读取结果 | `Deferred.await()` | 等待 async let 绑定、读取任务组结果 |
 
-`Deferred<T>` 是一种 `Job`，但 `Job` 不等于 `Deferred<Unit>`。`join()` 等待完成，不直接重抛目标任务的失败；`await()` 获取成功值或抛出目标错误。目标失败仍可能通过父子关系取消调用方，因此不能用 `join()` 隐藏失败。
+Kotlin 的 `async {}` 会创建子协程。Swift 函数声明中的 `async` 只表示函数可以挂起，更接近 Kotlin 的 `suspend`。两者都不保证函数在后台线程执行，也不会自动把阻塞调用变成非阻塞调用。
 
-Swift `Task {}` 是非结构化任务：普通函数返回、局部任务句柄消失，不会自动取消或等待它。`async let` 和任务组则有结构化生命周期。
+## 任务的生命周期
 
-## 03 · 取消是请求，不是强制终止
+结构化并发把子任务的生命周期限制在父作用域内。作用域退出前，要等子任务结束，包括取消后的清理。
+
+Kotlin 的 `coroutineScope` 是挂起函数：它提供创建子任务的作用域，等待代码块和子任务完成，再返回结果。它不负责切换调度器。只调用一个挂起接口的函数通常不需要额外包一层；需要创建并发子任务时，才需要这样的作用域。
+
+| Kotlin API | 用途 | 返回值 |
+|---|---|---|
+| `coroutineScope` | 管理一组子任务并等待结束 | 代码块结果 |
+| `launch` | 启动不返回业务数据的任务 | `Job` |
+| `async` | 启动需要结果的任务 | `Deferred<T>` |
+
+`Deferred<T>` 继承 `Job`，但 `Job` 不等于 `Deferred<Unit>`：
+
+- `join()` 等待结束，不直接重抛目标任务的失败原因。
+- `await()` 等待结果，返回值或抛出目标任务的异常。
+- 子任务失败仍可能通过父子关系取消等待者；换成 `join()` 并不能隔离失败。
+
+Swift 的 `async let` 和任务组有结构化生命周期。`Task {}` 是非结构化任务，普通函数返回或局部句柄消失，不会自动取消它。页面自己创建的 Task，需要明确保存句柄、取消和等待的位置。
+
+## 取消与清理
+
+取消需要任务配合。发出取消请求、任务停止、清理完成，是不同的时刻。
 
 ```text
-发出取消 → 操作响应取消 → finally / defer 清理 → 任务结束
+请求取消 → 任务响应取消 → finally / defer 清理 → 任务结束
 ```
 
-Kotlin 用 `job.cancelAndJoin()` 请求取消并等待；Swift 常见的显式管理方式是：
+Kotlin 的 `job.cancel()` 只请求取消；`job.cancelAndJoin()` 请求取消并挂起等待结束。Swift 可以显式取消后等待：
 
 ```swift
 worker.cancel()
 do {
     try await worker.value
 } catch is CancellationError {
-    // 当前操作因取消结束
+    // 任务已因取消结束
 }
 ```
 
-`Task.sleep` 响应取消并抛错，`defer` 在离开作用域时执行。读取 `worker.value` 不会触发取消；它负责等待任务结束并观察结果或错误。
+这里假设 worker 是可抛错的 Task。读取 `value` 不会触发取消，它负责等待和观察结果；`Task<Void, Never>` 的 value 无需 `try`。
 
-Swift 任务内部捕获取消异常且不重抛，可以正常返回结果；已有的取消标记不会因此清除。Kotlin 中，已被取消的 Job 不会因吞掉异常恢复正常；若只是内部操作主动抛出取消异常，吞掉它则可能导致外层 Job 正常完成。对于可复用的异步函数，通常应在清理后继续传播取消，避免把停止意图变成成功结果并继续后续逻辑。
+等待也有边界：Kotlin 的 join 可以响应等待者自身的取消；目标任务不配合取消时，cancelAndJoin 不保证立即返回。结构化作用域已负责退出前等待子任务，通常不需要再逐个手动 join。
 
-### 超时为何可能“超时了还没返回”
+### 检查状态，还是中断执行
 
-Swift 可以让工作任务与计时任务竞争：
-
-```text
-任务组 ─┬─ operation → 返回业务结果
-        └─ sleep → 抛出超时错误
-先完成的结果被读取 → 取消其余任务 → 等全部结束 → 返回或抛错
-```
-
-任务组退出前必须等待子任务结束。工作如果不配合取消，超时工具也不能保证在截止时刻立即返回。Kotlin 超时同样依赖合作式取消。
-
-挂起 API 如 `delay`、`Task.sleep` 已支持取消。长时间 CPU 循环应主动检查：Kotlin 用 `ensureActive()`，Swift 用 `Task.checkCancellation()`。单纯把函数声明为 suspend 或 async，不会自动让任意计算可取消。
-
-## 04 · 必要模块失败与可选模块降级
-
-名字请求失败可能让主页无法展示；徽章失败可以换默认徽章。错误边界要由业务决定。
-
-Kotlin 的普通 `coroutineScope` 中，子任务的非取消异常会使作用域失败并取消兄弟任务。`supervisorScope` 隔离直接子任务失败的影响，但不会替调用方吞异常。
-
-```kotlin
-suspend fun optionalBadge(): String = supervisorScope {
-    val badge = async { brokenBadge() }
-    try {
-        badge.await()
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (_: IllegalStateException) {
-        "默认徽章"
-    }
-}
-```
-
-如果换成 `coroutineScope`，内部 catch 即使执行，也不能恢复已经因子任务失败而失败的作用域。**捕获 await 抛出的错误，与阻止父子关系上的失败传播，是两件事。**
-
-Swift throwing task group 的路径有所不同：
-
-```text
-子任务失败 → next() / for try await 获取失败并抛错
-         → 错误离开组内代码块 → 取消其他子任务并等待退出
-         → 外层 catch
-```
-
-`try` 表示这里可能抛错，`catch` 才是捕获。子任务失败本身不等于组立即失败；如何消费结果、错误是否逃出组内代码块非常重要。可选模块可以在自己的子任务内处理业务错误并返回默认值，同时保留取消传播。
-
-## 05 · 从一个结果到一串结果
-
-下载进度、搜索输入和定位更新都不是一次性返回值，而是一串随时间产生的数据。
-
-```kotlin
-fun progressFlow(): Flow<Int> = flow {
-    for (progress in listOf(0, 25, 50, 75, 100)) {
-        delay(20)
-        emit(progress)
-    }
-}
-
-// 在协程中收集
-progressFlow()
-    .filter { it >= 50 }
-    .map { "下载进度 $it%" }
-    .collect { println(it) }
-```
-
-`flow {}` 创建冷流：收集前，代码块中的 delay 和 emit 都不会执行；每次收集都会重新运行生产逻辑。工厂函数里 flow 块外的普通代码则会在调用时执行。
-
-没有 buffer 等引入并发的操作符时，上游会等待当前下游处理完成，再继续生产。加 `buffer(2)` 后，生产与消费可以在不同协程推进，中间缓冲两个值。
-
-| 满缓冲区策略 | 行为 |
+| 操作 | 行为 |
 |---|---|
-| `SUSPEND`，默认 | 生产者等待空位 |
-| `DROP_OLDEST` | 丢弃缓冲区最旧值，接纳新值 |
-| `DROP_LATEST` | 丢弃新到值 |
-
-Swift `AsyncStream` 的语义不能直接照搬冷 Flow。用 continuation 和独立 Task 构建时，生产者可以在消费前开始；`yield` 不通过挂起来等待慢消费者，要明确缓冲策略，并处理 yield 的结果（如数据被丢弃）。
-
-```swift
-continuation.onTermination = { @Sendable _ in
-    producer.cancel()
-}
-```
-
-终止处理可以把消费侧终止连接到生产者取消，但单纯 `break` 不应被视为立刻停止任意生产者的保证；还需考虑流的引用、消费者任务取消和显式停止。不要把同一个 AsyncStream 当作默认广播给所有订阅者的事件总线。
-
-## 06 · 状态安全与业务原子性
-
-`value += 1` 是读取、计算、写入三个动作。两个任务都读到 0，再各写回 1，会丢失一次更新。
+| Kotlin `isActive` | 返回布尔值，由代码决定是否继续 |
+| Kotlin `ensureActive()` | 已取消时抛出 `CancellationException` |
+| Swift `Task.isCancelled` | 返回当前任务是否已取消 |
+| Swift `try Task.checkCancellation()` | 已取消时抛出 `CancellationError` |
 
 ```kotlin
-class SafeCounter {
-    private val mutex = Mutex()
-    private var value = 0
-    suspend fun increment() = mutex.withLock { value += 1 }
-    suspend fun current(): Int = mutex.withLock { value }
+if (isActive) {
+    updateState()
 }
+performNextStep() // 条件不成立时，仍会执行
 ```
 
-整个读改写必须放在同一个临界区；读取和写入各自加锁，中间仍可能交错。等待所有任务完成也不能修复已经丢失的更新。
+如果后续工作也必须停止，应在前面调用 `ensureActive()`，并让取消异常继续传播。Swift 的 `checkCancellation()` 可能抛错，所以要加 `try`；它不挂起，因此不需要 `await`。
 
-Swift actor 通过隔离管理自身状态：
+这些检查只反映当前时刻的状态，不是锁，也不能保证检查后任务不会再被取消。`delay` 和 `Task.sleep` 支持取消；长时间 CPU 循环则需要主动检查。
 
-```swift
-actor SafeCounter {
-    private var value = 0
-    func increment() { value += 1 }
-    func current() -> Int { value }
-}
-```
+### 取消异常与取消标志
 
-外部调用 `await counter.increment()` 可能要等待跨隔离调用，但 increment 内部没有挂起点，不会在加一的中间插入另一个 actor 隔离任务。actor 不等于专属线程，也不保证调用请求按提交顺序执行。
+异常类型和任务状态要分别考虑。任务可能已经取消，底层接口却抛出普通错误。可恢复错误的处理分支中，也可以再检查取消，避免误返回默认值。
 
-### actor 重入：await 后重新审视假设
+Kotlin 中，已经取消的 Job 不会因吞掉异常恢复正常。但如果内部操作只是主动抛出 `CancellationException`，外层捕获后不重抛，外层 Job 可能正常完成。因此可复用的挂起函数通常应继续传播取消。
 
-余额检查和扣款之间如果有 await，就可能发生：
+Swift 中，已经设置的取消标志不会因 catch 后返回而清除；单纯抛出 `CancellationError` 也不一定设置外层任务的取消标志。
 
-```text
-余额 100
-A 检查够取 80 → 挂起
-B 检查也够取 80 → 挂起
-A 恢复扣款 → 20
-B 恢复扣款 → -60
-```
+### 超时不保证按时返回
 
-没有同时修改内存的数据竞争，仍可能有业务竞态。简单修正是把检查和修改放在同一段不挂起的隔离代码中，或异步准备完成后重新检查最新状态。涉及真实外部支付副作用时，还需设计预留、幂等和补偿。
+超时通常通过取消正在执行的操作来实现。Swift 可以让操作和计时任务在任务组内竞争，读取先完成的结果后，取消其他任务并等待它们退出。
 
-## 07 · 搜索：减少请求与避免旧结果覆盖
+如果操作不配合取消，任务组仍要等待它结束。Kotlin 超时也依赖协作式取消。因此超时时间到了，不代表调用已经完成清理并返回。
 
-```kotlin
-queries
-    .distinctUntilChanged()
-    .mapLatest { query -> search(query) }
-```
+## 错误传播与局部降级
 
-`distinctUntilChanged` 去掉相邻重复输入；`mapLatest` 在新输入到来时取消尚未完成的旧转换。旧搜索已发送的结果不会被撤回，因此输入间隔足够长时，多个搜索结果都可能输出。
+先确定哪些数据必需，哪些失败后可以用默认值。以个人主页为例：名字失败时整体失败，头像失败显示默认图，未读数失败显示占位。
 
-防抖与取消承担不同职责：
+### Kotlin：在可选子任务内部处理失败
 
-| 机制 | 解决的问题 |
-|---|---|
-| debounce | 等输入暂时稳定，减少请求数量 |
-| mapLatest / 显式取消 | 请求过时时，停止旧工作 |
-| 更新前检查取消或请求编号 | 拒绝过时结果修改页面 |
+普通 `coroutineScope` 中，子任务的非取消异常会导致作用域失败，并取消兄弟任务。`supervisorScope` 隔离直接子任务失败的影响，但不会自动处理异常。即使使用 supervisor，代码块自身向外抛错时，仍会取消剩余子任务并等待退出。
 
-把 debounce 放在 mapLatest 前面，会推迟新输入到达 mapLatest；期间旧请求可能完成并输出。若要求键入瞬间旧结果就失效，应让原始输入立即使旧请求失效，再对新请求做防抖。有限模拟流正常结束时，debounce 会发送待处理末值，也不一定再等待完整防抖时长。
-
-Swift 示例显式保存最新 Task，提交新查询时 cancel 旧 Task；加载后、写状态前调用 `Task.checkCancellation()`，防止忽略取消的底层返回过时结果。页面结束时也要管理这个非结构化任务。
-
-## 08 · 页面状态与生命周期
-
-```text
-Idle → Loading ─┬─ Content(data)
-                └─ Failure(message)
-```
-
-用一个可穷举的状态类型，比散落的多个布尔值更容易保持一致。Kotlin 用 sealed interface，Swift 用 enum 的关联值携带数据和错误。
-
-Kotlin 的 `StateFlow` 保存当前状态，新订阅者拿到最新值，不会因重新订阅就自动发请求。它会合并更新，也基于相等性抑制重复值，因此不是保证每个中间事件都交付的日志。
-
-新加载取消旧 Job；更新成功或失败状态前检查 `ensureActive()`。模型应明确主线程调用约定，不能把取消检查当作任意多线程下的原子事务。
-
-Swift 可用 MainActor 隔离状态，再用请求编号防止乱序返回：
-
-```swift
-generation += 1
-let ticket = generation
-state = .loading
-
-do {
-    let header = try await loader()
-    try Task.checkCancellation()
-    guard ticket == generation else { return }
-    state = .content(header)
-} catch is CancellationError {
-    // 页面离开不显示业务失败
-} catch {
-    guard !Task.isCancelled, ticket == generation else { return }
-    state = .failure(String(describing: error))
-}
-```
-
-编号必须同时保护成功与失败路径：新请求成功后，旧请求的错误同样不能覆盖页面。请求编号只拒绝过时更新，不会自动停止旧工作。
-
-MainActor 管隔离，不自动提供 UI 观察。SwiftUI 还需要 Observation、ObservableObject 或显式更新 State；Android 使用生命周期感知的收集也不等于自动取消 ViewModel 内所有后台请求。
-
-取消后的状态也要有业务定义：页面已经离开，可以不展示错误；页面仍可见且用户主动取消加载，则要恢复 Idle 或旧内容，而不是永久留在 Loading。
-
-## 09 · 毕业作业：把三个边界串起来
-
-个人主页像一个点单台：A 负责并发备齐数据，B 负责把结果交给当前页面，C 负责在输入变化后撤销旧搜索。三个部分分别回答：哪些失败可降级、取消在哪里结束、谁还有资格写状态。
-
-```text
-刷新 → B 页面任务 → A 数据聚合 ─┬─ name：必需
-                              ├─ avatar：失败用默认图
-                              └─ unread：失败用占位
-输入 → C 取消旧搜索 → 防抖 → 搜索接口
-                         ↓
-              取消检查 + 请求编号检查 → 页面状态
-离开页面 → 取消持有的任务 + 使旧编号失效 + 恢复 Idle
-```
-
-### A · 降级放进子任务，不要等作用域已经失败
-
-Kotlin 可以在两个可选子任务内部完成降级，再让普通 `coroutineScope` 管理整体失败：
+如果只需要局部降级，可以在可选子任务内部把普通失败转换为值：
 
 ```kotlin
 suspend fun loadProfile(service: ProfileService): Profile = coroutineScope {
@@ -335,11 +176,15 @@ suspend fun loadProfile(service: ProfileService): Profile = coroutineScope {
 }
 ```
 
-三个请求先启动再等待。name 的普通失败使整个作用域失败；可选请求的普通失败已经转换为值，不会破坏父作用域。无需由 name 手动取消另外两个任务，也不必暂存异常后逐个等待。`supervisorScope` 也可以实现这个业务，但这里不需要额外的失败隔离机制。
+name 失败时，由作用域取消其他任务；可选请求的普通错误已经在各自任务内处理，不会使整个作用域失败。这里无需额外使用 `supervisorScope`，也无需由 name 手动取消其他任务。
 
-只捕获 `IllegalStateException` 不等于覆盖所有请求失败：测试里的 `error(...)` 恰好抛出这个类型，真实接口还可能抛 `IOException`。本练习约定普通 `Exception` 可降级；生产代码应按业务明确可恢复的错误种类。
+如果让可选子任务先以异常结束，再在普通作用域中 catch 它的 await，作用域可能已经被取消。捕获 await 的错误不能恢复已经失败的作用域。
 
-Swift 用 `async let` 表达三个固定子任务，把降级放在辅助函数中：
+上面的代码对普通 `Exception` 统一降级。实际项目应明确可恢复的错误类型，避免隐藏程序错误。测试也不应只用 `error(...)`：它抛出 `IllegalStateException`，不足以覆盖 `IOException` 等接口异常。
+
+### Swift：错误在等待结果时传播
+
+三个固定请求可以用 `async let`，降级逻辑放在辅助函数中：
 
 ```swift
 private func loadAvatar(_ service: ProfileService) async throws -> String {
@@ -364,52 +209,123 @@ private func loadUnread(_ service: ProfileService) async throws -> Int? {
     }
 }
 
-func loadProfile(_ service: ProfileService) async throws -> CapstoneProfile {
+func loadProfile(_ service: ProfileService) async throws -> Profile {
     async let name = service.name()
     async let avatar = loadAvatar(service)
     async let unread = loadUnread(service)
-    return try await CapstoneProfile(name: name, avatar: avatar, unread: unread)
+    return try await Profile(name: name, avatar: avatar, unread: unread)
 }
 ```
 
-初始化 `CapstoneProfile` 本身是同步的；这里的 `try await` 用于读取子任务结果。name 失败后，错误在等待其结果时被观察到；错误导致函数退出作用域，Swift 才会取消其他未完成的子任务并等待它们结束。不要理解成“任意 async let 一失败，兄弟任务立即取消”。见 [async let 的作用域与错误传播规则](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0317-async-let.md)。
+`Profile` 的初始化是同步的，这里的 `try await` 用于读取子任务结果。name 失败后，父任务在等待 name 时观察到错误；错误导致函数退出作用域，Swift 才会取消尚未完成的兄弟任务并等待它们结束。子任务失败和整个作用域退出不是同一时刻。参见 [async let 的错误传播规则](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0317-async-let.md)。
 
-### 取消异常类型与任务取消状态，是两件事
+throwing task group 也是通过 `next()` 或 `for try await` 观察子任务的错误。错误离开组内代码块时，剩余任务被取消；在组内处理错误后继续消费结果，则有不同的执行路径。
 
-接口可能在任务已经取消后，仍抛出普通错误。因此“先单独捕获取消异常，再在普通错误分支检查当前任务是否取消”不是 Swift 独有技巧，Kotlin 也可以这样防御：
+两个辅助函数先识别 `CancellationError`，再在普通错误分支检查当前任务状态。Kotlin 示例中的 `ensureActive()` 作用相同，都用于避免取消被误处理为降级。
 
-| 检查 | Kotlin | Swift |
-|---|---|---|
-| 当前收到的异常是不是取消 | `catch (e: CancellationException)` | `catch is CancellationError` |
-| 当前任务是否已经取消 | `ensureActive()` | `try Task.checkCancellation()` |
+### launch 的异常在哪里处理
 
-前者识别异常类型，后者读取任务状态。目的都是避免在应当停止时返回默认值，继续后续业务。
+业务异常可以在 launch 内捕获并转换成页面状态。未捕获的普通异常则按父子关系传播：普通 Job 通常会随子任务失败而取消，SupervisorJob 隔离直接子任务的失败，但仍需要处理未捕获异常。最终异常可能交给 `CoroutineExceptionHandler` 或平台的未捕获异常处理机制。参见 [Kotlin 异常处理规则](https://kotlinlang.org/docs/exception-handling.html)。
 
-Swift 的 `try` 表示可能抛错，`await` 表示可能挂起。`Task.checkCancellation()` 是可能抛错的同步检查，所以只需要 `try`；请求调用可能同时需要 `try await`。Kotlin 的异常机制不要求调用处显式写 `try`。
+调用 `refresh()` 的同步代码外面套 try/catch，不能捕获另一个协程体中的异步失败。`join()` 也不负责读取该失败；`Deferred.await()` 才会返回目标结果或抛出异常。
 
-### cancel、cancelAndJoin、isActive、ensureActive 的职责
+`CancellationException` 被协程机制视为取消，不会仅因子任务取消就让父作用域失败。取消仍然可以通过挂起调用向上传播，通常保留这种传播，清理放在 finally 中。
 
-| Kotlin 操作 | 意义 |
-|---|---|
-| `job.cancel()` | 请求取消，不等待清理结束 |
-| `job.cancelAndJoin()` | 请求取消，再挂起等待结束；不是阻塞线程 |
-| `isActive` | 返回布尔值，由调用方决定后续执行 |
-| `ensureActive()` | 已取消时抛异常，离开正常执行路径 |
+## 异步数据流
 
-`cancelAndJoin()` 可以理解为先 cancel 再 join，但等待者自身也可能被取消。被取消的工作不配合时，等待不保证立即结束。结构化作用域已经负责退出前等待子任务，因此通常不必再逐个手动 join。
+一次请求返回一个结果。进度、输入和定位则会持续产生值，需要流来表达。
 
 ```kotlin
-if (isActive) {
-    updateState()
+fun progressFlow(): Flow<Int> = flow {
+    for (progress in listOf(0, 25, 50, 75, 100)) {
+        delay(20)
+        emit(progress)
+    }
 }
-performNextStep() // 即使不活跃，仍会执行到这里
+
+// 在协程中收集
+progressFlow()
+    .filter { it >= 50 }
+    .map { "下载进度 $it%" }
+    .collect { println(it) }
 ```
 
-换成 `ensureActive()` 可以在已取消时中断后续工作，但要避免再用空 catch 吞掉取消异常。两者都只是当前时刻的检查，不是锁，也不能代替请求编号。
+`flow {}` 创建冷流。收集前，代码块里的 delay 和 emit 不执行；每次收集都会重新运行。flow 块外的普通代码仍会在工厂函数调用时执行。
 
-### B · 页面任务如何处理取消与失败
+默认顺序收集时，上游等下游处理完当前值，再继续生产。`buffer(2)` 允许生产和消费在不同协程推进，中间缓冲两个值。
 
-页面任务把普通失败变成状态，把取消视为结束工作。Kotlin 的关键任务体如下，`ticket` 在发起新请求时分配：
+| 缓冲区满时的策略 | 行为 |
+|---|---|
+| `SUSPEND`，默认 | 生产者等待空位 |
+| `DROP_OLDEST` | 丢弃最旧值，接纳新值 |
+| `DROP_LATEST` | 丢弃新到值 |
+
+Swift `AsyncStream` 不等同于冷 Flow。用 continuation 和独立 Task 构建时，生产者可以在消费前开始；`yield` 不通过挂起来等待慢消费者。需要选择缓冲策略，并处理值被丢弃等结果。
+
+```swift
+continuation.onTermination = { @Sendable _ in
+    producer.cancel()
+}
+```
+
+这个处理把流的终止连接到生产者取消。仅从循环 break，不保证任意生产者立即停止，还要考虑流的引用和显式关闭。AsyncStream 也不是默认向多个订阅者广播的事件总线。
+
+## 共享状态与原子性
+
+`value += 1` 包含读取、计算、写入。两个任务都读到 0，再各写回 1，就会丢失一次更新。
+
+```kotlin
+class SafeCounter {
+    private val mutex = Mutex()
+    private var value = 0
+    suspend fun increment() = mutex.withLock { value += 1 }
+    suspend fun current(): Int = mutex.withLock { value }
+}
+```
+
+完整的读改写要放在同一个临界区。读取和写入分别加锁，中间仍然可能交错。
+
+Swift actor 通过隔离管理状态：
+
+```swift
+actor SafeCounter {
+    private var value = 0
+    func increment() { value += 1 }
+    func current() -> Int { value }
+}
+```
+
+外部通常通过 `await counter.increment()` 跨隔离调用。increment 内没有挂起点，加一过程不会被另一个 actor 隔离任务插入。actor 不等于专属线程，也不保证请求按提交顺序执行。
+
+### await 会改变原先的条件
+
+余额检查与扣款之间如果有 await，另一个任务可能在等待期间修改余额：
+
+```text
+余额 100
+A 检查够取 80 → 挂起
+B 检查也够取 80 → 挂起
+A 恢复扣款 → 20
+B 恢复扣款 → -60
+```
+
+这段代码可以没有数据竞争，却仍有业务竞态。简单的检查与修改应放在同一段不挂起的隔离代码内；必须异步准备时，返回后重新检查状态。涉及外部交易时，还需要预留、幂等或补偿等业务设计。
+
+## 页面状态与生命周期
+
+用状态类型表达页面当前显示什么：
+
+```text
+Idle → Loading → Content / Failure
+```
+
+Kotlin 可用 sealed interface，Swift 可用带关联值的 enum。Kotlin `StateFlow` 保存最新状态，按相等性抑制重复值，也可能合并中间更新；它适合表示当前状态，不适合当作保证逐条交付的事件日志。重新订阅 StateFlow 本身不会自动发起请求。
+
+### 防止旧结果覆盖新状态
+
+刷新时取消旧任务、增加请求编号，并记录本次 ticket。请求返回后，只有未取消且编号仍匹配的任务可以写状态。普通错误也要经过相同检查，否则旧错误可能覆盖新内容。
+
+以下代码位于 Kotlin 的 launch 任务体内：
 
 ```kotlin
 try {
@@ -428,43 +344,55 @@ try {
 }
 ```
 
-取消与编号检查必须覆盖成功和普通失败，否则旧错误也可能覆盖新页面。代码约定从同一 UI 线程管理请求；检查与写入之间没有挂起点。Swift 对应的状态与版本号由 MainActor 隔离，但 await 后仍要重新检查请求是否有效。
+这里约定状态与请求句柄都在同一个 UI 线程管理，检查到写入之间没有挂起点。取消检查不能代替任意多线程下的同步。
 
-Kotlin 空的取消 catch 有一个容易漏测的区别：如果外部已经 cancel，吞掉异常不会使 Job 恢复活跃；但如果 loader 只是主动抛出 `CancellationException`，吞掉它可能使外层 Job 正常完成。因此本练习的 Kotlin 页面任务重新抛出取消，保留返回 Job 的取消语义。
+Swift 的状态和编号可以由 MainActor 隔离。await 返回后也要检查取消和编号：MainActor 保证访问隔离，不保证旧请求先返回。
 
-Swift 的页面接口则显式返回 `Task<Void, Never>`：Void 表示没有结果值，Never 表示任务不向外抛错。因此它在任务边界这样结束取消路径：
+### 在哪里结束取消传播
 
-```swift
-} catch is CancellationError {
-    return
-} catch {
-    guard !Task.isCancelled, ticket == pageVersion else { return }
-    pageState = .failure(String(describing: error))
-}
-```
+数据函数通常继续向外抛错；页面任务可以把普通错误转换成状态，并在任务边界结束取消路径。两种接口有不同约定：
 
-如果在这里重新抛出，任务会成为 `Task<Void, Error>`，与属性和返回类型不匹配。需要外部通过 `try await task.value` 接收错误时，应一起调整接口类型。这个区别来自任务边界设计，不是“Swift 永远吞取消，Kotlin 永远重抛”。
+| 接口 | 处理方式 |
+|---|---|
+| Kotlin `launch` | 业务错误转为状态，取消异常重新抛出，保留 Job 的取消语义 |
+| Swift `async throws` 数据函数 | 向调用者传播错误，包括取消 |
+| Swift `Task<Void, Never>` 页面任务 | 内部处理错误，取消时结束任务体 |
+| Swift `Task<Void, Error>` | 可通过 `try await task.value` 读取错误 |
 
-Swift 中，已调用 cancel 的任务不会因 catch 后 return 而清除取消标志；单纯抛出 `CancellationError` 也不必然设置外层任务的取消标志。
+`Task<Void, Never>` 表示任务没有业务返回值，也不向外抛错。在它的任务体中重新抛出未处理的取消异常，会与声明的类型不匹配。可以在 catch 中直接 return；这不会清除已经设置的取消标志。
 
-### launch 抛出的异常由谁处理
+页面离开时要取消自己持有的任务。若页面仍可见、用户只是停止加载，则应恢复 Idle 或旧内容，避免一直显示 Loading。
 
-普通业务异常可以在任务内部转为 Failure。Kotlin 未捕获的普通异常会按父子关系传播：普通 Job 通常随子任务失败而取消，SupervisorJob 隔离直接子任务的失败，但不代替异常处理。最终未处理的 launch 异常可能交给 CoroutineExceptionHandler 或平台未捕获异常机制。取消异常则作为正常取消处理，不仅因子任务取消就使父任务失败。见 [Kotlin 异常处理规则](https://kotlinlang.org/docs/exception-handling.html)。
+### 状态隔离不等于 UI 更新
 
-在同步调用 `refresh()` 外套 try/catch，不能捕获另一个协程体里的异步失败；`job.join()` 也不负责重新抛出目标任务的异常。`Deferred.await()` 才会读取目标结果或失败。取消仍可能通过挂起调用传播，外部通常让它继续传播，清理使用 finally。
+MainActor 不会自动让普通属性驱动 SwiftUI，还需要 Observation、ObservableObject 或显式更新 State。Android 的生命周期感知收集停止后，也不等于 ViewModel 里已经启动的请求被取消。
 
-### C · 防抖结束和请求结束，是两个检查点
+任务归属要按页面行为选择：ViewModel 的任务可以跨临时不可见状态继续运行；只允许在可见期间运行的工作，则应放进对应的生命周期作用域。同步 CPU 重活和阻塞 I/O 也不能仅靠 suspend、async 或 MainActor 解决，需要合适的调度器或执行方式。
 
-新输入到来就取消旧任务并增加版本号，然后 trim 输入。空字符串恢复 Idle 并结束；非空输入等待 300ms 再请求。
+## 搜索防抖与过期结果
+
+防抖减少请求次数；取消停止旧工作；请求编号防止旧结果回写。这三件事不能互相替代。
+
+新输入到来时，先取消旧任务并使旧编号失效，再处理新输入。空字符串恢复 Idle；非空输入等待一段时间后请求。
 
 ```text
-新输入 → 旧任务立即失效
-新任务 → 防抖等待 → 取消检查 → 请求 → 取消与版本检查 → 写状态
+输入变化 → 旧任务失效
+新任务 → 防抖等待 → 检查取消 → 请求 → 检查取消和编号 → 写状态
 ```
 
-Kotlin 的 `delay` 支持取消：等待期间收到 cancel，会抛出取消异常。它放在 try/catch 外也可以自然让 launch 取消。Swift 若返回 `Task<Void, Never>`，可抛错的防抖操作必须在任务内部处理，否则任务类型不匹配。
+Kotlin 可以用 Flow 处理连续输入：
 
-下面是 Swift 搜索任务体；`debounce` 是注入的等待函数，默认实现为 `Task.sleep(for: .milliseconds(300))`：
+```kotlin
+queries
+    .distinctUntilChanged()
+    .mapLatest { query -> search(query) }
+```
+
+`distinctUntilChanged` 去掉相邻重复输入，`mapLatest` 在新输入到来时取消旧转换。已经发出的结果不会撤回。若 debounce 放在 mapLatest 前，新输入还在防抖时，旧请求可能继续返回结果。要求输入一变化旧结果就失效时，应先让旧请求失效，再对新请求等待。
+
+有限流结束时，debounce 会发出待处理的末值，不一定再等完整防抖时间。
+
+Swift 可以保存并替换当前搜索 Task。下面的任务体假设 query 已经 trim，旧任务已取消，ticket 已分配；debounce 是注入的等待函数，默认等待 300ms：
 
 ```swift
 let task = Task { @MainActor in
@@ -486,56 +414,45 @@ let task = Task { @MainActor in
 }
 ```
 
-`guard !normalized.isEmpty` 判断布尔条件，不需要 `guard let`；后者用于 Optional 绑定。
+防抖后的检查阻止旧任务发起请求，请求后的检查阻止旧结果写入。默认 Task.sleep 支持取消，但注入的等待函数或第三方接口未必配合，因此两处都检查。
 
-防抖后的检查阻止旧任务发起请求，请求后的检查阻止旧结果写入。虽然默认 sleep 支持取消，但测试注入的等待函数或第三方实现未必配合，因此保留等待后的检查。成功和错误两条路径都要防过期回写。
+`guard !normalized.isEmpty` 是布尔判断；`guard let` 用于 Optional 绑定。Kotlin 的 delay 可以放在 try/catch 外自然传播取消；Swift 的 `Task<Void, Never>` 则需要在内部处理可抛错的 debounce 调用。
 
-### 验收不能只覆盖成功结果
+## 验证并发行为
 
-| 边界 | 验证方式 |
+测试要控制执行顺序，不能只看最终结果或真实耗时。
+
+| 要验证的行为 | 测试方式 |
 |---|---|
-| 真正并发 | Kotlin 虚拟时间验证 120/180/150ms 请求共用 180ms；Swift 用可控门确认三个请求都启动后才放行 |
-| 可选降级 | 同时测试 `IllegalStateException` 与 `IOException` 等不同普通错误 |
-| 取消与清理 | 检查子任务清理、返回 Job 的取消状态；不要只断言没显示 Failure |
-| 乱序 | 让旧请求忽略取消，分别晚成功、晚失败，确认最新状态不变 |
-| 搜索防抖 | 在等待窗口内连续输入，确认只请求最后的非空查询 |
-| 空输入与关闭 | 验证不发请求、取消在途工作、清空结果，以及重新进入可加载 |
+| 请求确实并发 | Kotlin 用虚拟时间；Swift 用可控信号，确认所有请求启动后再放行 |
+| 可选失败正确降级 | 覆盖不同普通错误类型，并单独验证取消 |
+| 取消后完成清理 | 检查 finally / defer，以及任务结果或取消状态 |
+| 旧结果不能覆盖 | 让旧请求忽略取消，分别晚成功、晚失败 |
+| 防抖只发最后一次请求 | 在等待窗口内连续输入，记录实际调用 |
+| 空输入、关闭与重新进入 | 检查清空状态、停止在途工作和再次加载 |
 
-测试中的超时只是防止错误实现卡死，不是接口性能标准。逻辑测试通过，也不等于已经验证真实 App 的生命周期、UI 响应或阻塞 I/O 的执行方式。以上示例需要框架中的类型、状态属性和注入接口；完整接入时还要确认任务所有者、UI 观察方式和退出时的取消策略。
+测试超时用于防止卡死，不是接口性能标准。逻辑测试通过后，仍要在 App 中验证导航离开、后台切换、UI 更新与卡顿情况。
 
-## 计时补充：不要把经过时间当作 CPU 时间
+## 计时：经过时间与 CPU 时间
 
-| 问题 | 工具或测量方式 |
+| 测量目标 | 工具 |
 |---|---|
-| 现在是什么日期时间？ | `Date().timeIntervalSince1970` |
-| 操作从开始到返回经过多久？ | Swift ContinuousClock / Kotlin measureTime |
-| 进程实际消耗多少 CPU 时间？ | 平台 CPU 时间接口、性能分析工具 |
-| 用户多久看到结果？ | 从交互开始测到实际界面呈现 |
+| 当前日期时间 | `Date().timeIntervalSince1970` |
+| 操作从开始到返回的耗时 | Swift `ContinuousClock`、Kotlin `measureTime` |
+| 实际 CPU 消耗 | 平台 CPU 时间接口或性能分析工具 |
+| 用户等待时间 | 从交互开始测到实际界面呈现 |
 
-系统时间校正可能影响 Date 差值；单调时钟适合测量 latency。ContinuousClock 包含等待和系统睡眠时间，不是 CPU 工作时间。跨设备的单调时间点不能直接相减。
+系统校时可能影响 Date 差值。测量 latency 应使用单调时钟。ContinuousClock 包含等待和系统睡眠时间，不能用来直接代表 CPU 工作时间；不同设备的单调时间点也不能直接相减。
 
-首次运行可能包含类加载、运行时初始化和调度开销。测量时把打印放到计时外，在同一次运行中预热并重复观察。浏览器上传和编译等待不直接计入代码内部的 measureTime。一次 300ms 的结果不能单独证明两个请求串行，观察任务的开始和结束关系更直接。
+首次运行可能包含类加载、初始化和调度开销。测量时移出打印、预热并重复观察。判断是否并发时，记录请求的开始与结束关系，比单次总耗时更可靠。
 
-## 把知识迁入真实页面
-
-实现一个个人主页，可以按以下顺序验收：
-
-1. 并发加载必需的数据，所有任务有明确拥有者。
-2. 可选模块失败时降级，取消不被当成普通失败吞掉。
-3. 离开页面后，根据业务决定取消哪些任务。
-4. 快速刷新或搜索，旧成功和旧错误都不能覆盖最新状态。
-5. 对成功、失败、取消、乱序完成分别验证；用可控信号安排顺序，避免只靠 sleep 猜测。
-6. CPU 密集计算和阻塞 I/O 不占用 UI 执行资源；状态更新符合隔离规则。
-
-最实用的自检不是“有没有写 await”，而是：**任务什么时候开始，谁能让它结束，结果属于哪次操作，状态更新前的假设还成立吗？**
-
-## 官方参考
+## 参考资料
 
 - [Kotlin 协程指南](https://kotlinlang.org/docs/coroutines-guide.html)
-- [Kotlin 异步 Flow](https://kotlinlang.org/docs/flow.html)
+- [Kotlin 异常处理](https://kotlinlang.org/docs/exception-handling.html)
+- [Kotlin Flow](https://kotlinlang.org/docs/flow.html)
 - [Android 协程最佳实践](https://developer.android.com/kotlin/coroutines/coroutines-best-practices)
 - [Swift Concurrency](https://docs.swift.org/swift-book/documentation/the-swift-programming-language/concurrency/)
-- [Swift 结构化并发设计](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0304-structured-concurrency.md)
-- [Swift actor 设计](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0306-actors.md)
-
-示例范围：Kotlin/JVM + kotlinx.coroutines 及 Swift Concurrency。文中片段聚焦概念，部分依赖上下文中的类型、导入和调用环境；不是完整 App，也不替代平台生命周期与真实网络验证。
+- [Swift 结构化并发](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0304-structured-concurrency.md)
+- [Swift async let](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0317-async-let.md)
+- [Swift actor](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0306-actors.md)
