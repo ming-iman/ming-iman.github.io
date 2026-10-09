@@ -17,3 +17,6 @@
 .prose pre code{padding-top:0}
 .code-block>.copy-code{z-index:1;top:8px;right:8px;min-height:32px;min-width:44px}
 @media print{.prose .code-block pre{padding-top:22px}}
+
+/* 文章配图保留原始分辨率，按阅读区域缩放，可打开原图查看细节。 */
+.prose .article-figure{margin:32px 0}.prose .article-figure a{display:block;border:0}.prose .article-figure img{display:block;width:100%;height:auto;max-width:100%;border-radius:8px}.prose .article-figure figcaption{margin-top:10px;color:var(--muted,#667085);font-size:12px;line-height:1.7;text-align:center}

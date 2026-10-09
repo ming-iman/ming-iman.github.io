@@ -2,7 +2,7 @@
 title: "Kotlin 与 Swift 并发开发笔记"
 description: "整理 Kotlin 与 Swift 的挂起、任务生命周期、取消、错误处理、异步流与状态管理，以及页面加载和搜索中的常见问题。"
 date: 2026-09-29
-updated: 2026-10-08
+updated: 2026-10-09
 category: "移动端开发"
 tags: [Kotlin, Swift, 协程, 并发, 学习笔记]
 ---
@@ -53,6 +53,13 @@ func loadHeader() async throws -> Header {
 
 等待名字时，未读请求已经开始。总耗时通常接近较慢请求的耗时。按顺序读取结果不会使已经启动的任务变成串行；创建一个任务后立即等待，再创建下一个，才会失去这部分并发。
 
+<figure class="article-figure">
+  <a href="/images/concurrency/sequential-concurrent.webp" target="_blank" rel="noopener" aria-label="查看原图：顺序调用约需 300ms；先启动两个独立请求再等待，约需 180ms。">
+    <img src="/images/concurrency/sequential-concurrent.webp" alt="顺序调用约需 300ms；先启动两个独立请求再等待，约需 180ms。" width="1122" height="1402" loading="lazy" decoding="async" />
+  </a>
+  <figcaption>图 1 · 顺序调用与并发请求（点击查看原图）</figcaption>
+</figure>
+
 | 操作 | Kotlin | Swift |
 |---|---|---|
 | 声明可挂起函数 | `suspend fun` | `func ... async` |
@@ -86,9 +93,12 @@ Swift 的 `async let` 和任务组有结构化生命周期。`Task {}` 是非结
 
 取消需要任务配合。发出取消请求、任务停止、清理完成，是不同的时刻。
 
-```text
-请求取消 → 任务响应取消 → finally / defer 清理 → 任务结束
-```
+<figure class="article-figure">
+  <a href="/images/concurrency/cancellation-cleanup.webp" target="_blank" rel="noopener" aria-label="查看原图：取消请求、响应取消、清理和任务结束是不同阶段；等待任务结束才能确认清理完成。">
+    <img src="/images/concurrency/cancellation-cleanup.webp" alt="取消请求、响应取消、清理和任务结束是不同阶段；等待任务结束才能确认清理完成。" width="1122" height="1402" loading="lazy" decoding="async" />
+  </a>
+  <figcaption>图 2 · 取消与清理的执行顺序（点击查看原图）</figcaption>
+</figure>
 
 Kotlin 的 `job.cancel()` 只请求取消；`job.cancelAndJoin()` 请求取消并挂起等待结束。Swift 可以显式取消后等待：
 
@@ -223,6 +233,13 @@ throwing task group 也是通过 `next()` 或 `for try await` 观察子任务的
 
 两个辅助函数先识别 `CancellationError`，再在普通错误分支检查当前任务状态。Kotlin 示例中的 `ensureActive()` 作用相同，都用于避免取消被误处理为降级。
 
+<figure class="article-figure">
+  <a href="/images/concurrency/error-propagation.webp" target="_blank" rel="noopener" aria-label="查看原图：Kotlin coroutineScope 中的子任务普通失败会取消兄弟任务；Swift async let 的错误被父任务观察并向外传播后，作用域取消并等待剩余任务。">
+    <img src="/images/concurrency/error-propagation.webp" alt="Kotlin coroutineScope 中的子任务普通失败会取消兄弟任务；Swift async let 的错误被父任务观察并向外传播后，作用域取消并等待剩余任务。" width="1122" height="1402" loading="lazy" decoding="async" />
+  </a>
+  <figcaption>图 3 · Kotlin 与 Swift 的错误传播（点击查看原图）</figcaption>
+</figure>
+
 ### launch 的异常在哪里处理
 
 业务异常可以在 launch 内捕获并转换成页面状态。未捕获的普通异常则按父子关系传播：普通 Job 通常会随子任务失败而取消，SupervisorJob 隔离直接子任务的失败，但仍需要处理未捕获异常。最终异常可能交给 `CoroutineExceptionHandler` 或平台的未捕获异常处理机制。参见 [Kotlin 异常处理规则](https://kotlinlang.org/docs/exception-handling.html)。
@@ -259,6 +276,13 @@ progressFlow()
 | `SUSPEND`，默认 | 生产者等待空位 |
 | `DROP_OLDEST` | 丢弃最旧值，接纳新值 |
 | `DROP_LATEST` | 丢弃新到值 |
+
+<figure class="article-figure">
+  <a href="/images/concurrency/buffer-strategies.webp" target="_blank" rel="noopener" aria-label="查看原图：缓冲区已有 1、2，新值 3 到达：SUSPEND 等待，DROP_OLDEST 保留 2、3，DROP_LATEST 保留 1、2。">
+    <img src="/images/concurrency/buffer-strategies.webp" alt="缓冲区已有 1、2，新值 3 到达：SUSPEND 等待，DROP_OLDEST 保留 2、3，DROP_LATEST 保留 1、2。" width="1122" height="1402" loading="lazy" decoding="async" />
+  </a>
+  <figcaption>图 4 · 缓冲区满载策略（点击查看原图）</figcaption>
+</figure>
 
 Swift `AsyncStream` 不等同于冷 Flow。用 continuation 和独立 Task 构建时，生产者可以在消费前开始；`yield` 不通过挂起来等待慢消费者。需要选择缓冲策略，并处理值被丢弃等结果。
 
@@ -301,13 +325,12 @@ actor SafeCounter {
 
 余额检查与扣款之间如果有 await，另一个任务可能在等待期间修改余额：
 
-```text
-余额 100
-A 检查够取 80 → 挂起
-B 检查也够取 80 → 挂起
-A 恢复扣款 → 20
-B 恢复扣款 → -60
-```
+<figure class="article-figure">
+  <a href="/images/concurrency/actor-reentrancy.webp" target="_blank" rel="noopener" aria-label="查看原图：A、B 在 await 前都检查余额 100，恢复后各扣除 80，余额变为 −60；actor 隔离不保证跨挂起点的业务原子性。">
+    <img src="/images/concurrency/actor-reentrancy.webp" alt="A、B 在 await 前都检查余额 100，恢复后各扣除 80，余额变为 −60；actor 隔离不保证跨挂起点的业务原子性。" width="1122" height="1402" loading="lazy" decoding="async" />
+  </a>
+  <figcaption>图 5 · actor 中跨挂起点的业务竞态（点击查看原图）</figcaption>
+</figure>
 
 这段代码可以没有数据竞争，却仍有业务竞态。简单的检查与修改应放在同一段不挂起的隔离代码内；必须异步准备时，返回后重新检查状态。涉及外部交易时，还需要预留、幂等或补偿等业务设计。
 
@@ -372,6 +395,13 @@ MainActor 不会自动让普通属性驱动 SwiftUI，还需要 Observation、Ob
 ## 搜索防抖与过期结果
 
 防抖减少请求次数；取消停止旧工作；请求编号防止旧结果回写。这三件事不能互相替代。
+
+<figure class="article-figure">
+  <a href="/images/concurrency/search-stale-results.webp" target="_blank" rel="noopener" aria-label="查看原图：新输入取消旧请求并更新编号；新请求经过防抖后返回并显示，忽略取消的旧请求晚返回时被编号检查拦截。">
+    <img src="/images/concurrency/search-stale-results.webp" alt="新输入取消旧请求并更新编号；新请求经过防抖后返回并显示，忽略取消的旧请求晚返回时被编号检查拦截。" width="1122" height="1402" loading="lazy" decoding="async" />
+  </a>
+  <figcaption>图 6 · 防抖、取消与过期结果（点击查看原图）</figcaption>
+</figure>
 
 新输入到来时，先取消旧任务并使旧编号失效，再处理新输入。空字符串恢复 Idle；非空输入等待一段时间后请求。
 
